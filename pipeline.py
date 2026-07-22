@@ -119,6 +119,7 @@ BLOTATO_ACCOUNT_IDS = {
 
 
 def post_to_blotato(platform: str, text: str) -> str:
+    """Blotato REST APIで指定プラットフォームにテキスト投稿する。"""
     api_key = os.environ["BLOTATO_API_KEY"]
     account_id = BLOTATO_ACCOUNT_IDS.get(platform)
     if not account_id:
@@ -140,7 +141,12 @@ def post_to_blotato(platform: str, text: str) -> str:
         headers={"blotato-api-key": api_key, "Content-Type": "application/json"},
         json=payload,
     )
-    response.raise_for_status()
+    if not response.ok:
+        raise RuntimeError(
+            f"Blotato投稿失敗 status={response.status_code} "
+            f"body={response.text[:1000]} "
+            f"payload={json.dumps(payload, ensure_ascii=False)[:500]}"
+        )
     return response.json()["postSubmissionId"]
 
 
