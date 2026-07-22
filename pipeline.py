@@ -73,7 +73,8 @@ post_4(最後の投稿)には、LINE公式アカウントへの登録リンク�
 
 出力は次の1行のJSONオブジェクトのみとし、説明文・前置き・コードフェンスは一切含めないこと:
 {{"post_1": "...", "post_2": "...", "post_3": "...", "post_4": "..."}}
-各投稿は2〜4行程度に収め、全体が長くなりすぎないようにしてください。
+Threadsは1投稿あたり500文字までのため、post_1〜post_4を全部つなげた合計が
+400文字以内に収まるよう、各投稿は簡潔に(1〜2行程度)してください。
 """
 
     api_key = os.environ["ANTHROPIC_API_KEY"]
@@ -155,12 +156,24 @@ def log_to_sheets(row: dict):
     print("log_to_sheets:", row)
 
 
+def build_threads_text(thread: dict) -> str:
+    """Threadsは1投稿500文字までのため、収まらない場合はフックとLINE誘導のみに絞る。"""
+    full_text = "\n\n".join(thread.values())
+    if len(full_text) <= 480:
+        return full_text
+    short_text = "\n\n".join([thread.get("post_1", ""), thread.get("post_4", "")])
+    if len(short_text) <= 480:
+        return short_text
+    return short_text[:480]
+
+
 def main():
     theme = get_theme_for_now()
     thread = generate_thread_text(theme)
     full_text = "\n\n".join(thread.values())
+    threads_text = build_threads_text(thread)
 
-    threads_post_id = post_to_blotato("threads", full_text)
+    threads_post_id = post_to_blotato("threads", threads_text)
 
     notify_for_line_voom(full_text)
 
@@ -168,6 +181,7 @@ def main():
         "date": datetime.datetime.now().isoformat(),
         "theme": theme,
         "text": full_text,
+        "threads_text": threads_text,
         "threads_post_id": threads_post_id,
     })
 
