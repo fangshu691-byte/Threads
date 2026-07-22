@@ -8,15 +8,13 @@
 """
 
 import os
+import re
 import json
 import datetime
 import requests
 
 PROJECT_DIR = "project"
 
-# 7:00〜20:00の1時間おき14枠で自動的に切り替えるテーマ一覧。
-# 日付×時間枠のインデックスで選ぶため、同じ日でも枠ごとに、日を跨いでも
-# 単純な曜日パターンにならないよう回転する。テーマ数は自由に増減可能。
 THEMES = [
     "白髪ぼかしの基本(染めるよりぼかす)",
     "分け目の白髪が気になる悩み",
@@ -34,7 +32,6 @@ THEMES = [
     "白髪ケアで後悔しないための知識",
 ]
 
-
 LINE_URL = "https://lin.ee/9UzZKWk"
 
 
@@ -45,16 +42,14 @@ def load_template(filename: str) -> str:
 
 
 def get_theme_for_now() -> str:
-    """現在時刻(JST)から、今回投稿すべきテーマを自動選択する。"""
     jst = datetime.timezone(datetime.timedelta(hours=9))
     now = datetime.datetime.now(jst)
-    slot_index = max(0, min(13, now.hour - 7))  # 7時=0枠 〜 20時=13枠
+    slot_index = max(0, min(13, now.hour - 7))
     day_index = now.timetuple().tm_yday
     idx = (day_index * 14 + slot_index) % len(THEMES)
     return THEMES[idx]
 
 
-# ---------- 1. Threads文章生成（Claude API） ----------
 def generate_thread_text(theme: str) -> dict:
     persona = load_template("persona.md")
     offer = load_template("offer.md")
@@ -76,8 +71,9 @@ post_4(最後の投稿)には、LINE公式アカウントへの登録リンク�
 # 型
 {template}
 
-出力はJSON形式のみで、それ以外の文章は含めないこと。以下のキーを持つこと:
+出力は次の1行のJSONオブジェクトのみとし、説明文・前置き・コードフェンスは一切含めないこと:
 {{"post_1": "...", "post_2": "...", "post_3": "...", "post_4": "..."}}
+各投稿は2〜4行程度に収め、全体が長くなりすぎないようにしてください。
 """
 
     api_key = os.environ["ANTHROPIC_API_KEY"]
@@ -90,7 +86,7 @@ post_4(最後の投稿)には、LINE公式アカウントへの登録リンク�
         },
         json={
             "model": "claude-sonnet-4-6",
-            "max_tokens": 1000,
+            "max_tokens": 2000,
             "messages": [{"role": "user", "content": prompt}],
         },
     )
@@ -98,27 +94,30 @@ post_4(最後の投稿)には、LINE公式アカウントへの登録リンク�
     data = response.json()
     text = data["content"][0]["text"].strip()
 
-    # ```json ... ``` のようなコードフェンスが付いた場合に備えて除去
     if text.startswith("```"):
         text = text.strip("`")
         if text.startswith("json"):
             text = text[4:].strip()
 
-    return json.loads(text)
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    if not match:
+        raise ValueError(f"JSONが見つかりませんでした。応答内容: {text[:500]}")
+    json_text = match.group(0)
+
+    try:
+        return json.loads(json_text)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"JSON解析エラー: {e}\n応答内容: {json_text[:1000]}") from e
 
 
-# ---------- 2. Threads / Instagram投稿(Blotato REST API・無人実行用) ----------
-# Claude Code + MCPはチャットセッションが必要なため、GitHub Actionsのような
-# 無人自動実行では使えない。ここではBlotatoの通常のREST APIを直接叩く。
 BLOTATO_BASE_URL = "https://backend.blotato.com/v2"
 BLOTATO_ACCOUNT_IDS = {
-    "threads": "8247",   # massu_aile (テスト投稿で確認済み)
-    "instagram": None,   # TODO: Instagram接続後にaccountIdを設定
+    "threads": "8247",
+    "instagram": None,
 }
 
 
 def post_to_blotato(platform: str, text: str) -> str:
-    """Blotato REST APIで指定プラットフォームにテキスト投稿する。"""
     api_key = os.environ["BLOTATO_API_KEY"]
     account_id = BLOTATO_ACCOUNT_IDS.get(platform)
     if not account_id:
@@ -144,7 +143,6 @@ def post_to_blotato(platform: str, text: str) -> str:
     return response.json()["postSubmissionId"]
 
 
-# ---------- 3. LINE VOOM(自動投稿不可 → 通知のみ) ----------
 def notify_for_line_voom(text: str):
     webhook_url = os.environ.get("SLACK_WEBHOOK_URL")
     if not webhook_url:
@@ -153,9 +151,7 @@ def notify_for_line_voom(text: str):
     requests.post(webhook_url, json={"text": f"LINE VOOM手動投稿してください:\n{text}"})
 
 
-# ---------- 4. Googleスプレッドシートへログ保存 ----------
 def log_to_sheets(row: dict):
-    # TODO: gspread または Google Sheets API v4 で1行追加
     print("log_to_sheets:", row)
 
 
@@ -164,9 +160,7 @@ def main():
     thread = generate_thread_text(theme)
     full_text = "\n\n".join(thread.values())
 
-    # Threads / Instagramへ実際に投稿(無人実行なのでREST APIを直接叩く)
     threads_post_id = post_to_blotato("threads", full_text)
-    # instagram_post_id = post_to_blotato("instagram", full_text)  # accountId設定後に有効化
 
     notify_for_line_voom(full_text)
 
