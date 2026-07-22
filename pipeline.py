@@ -156,7 +156,7 @@ def notify_for_line_voom(text: str):
 # ---------- 4. Googleスプレッドシートへログ保存 ----------
 def log_to_sheets(row: dict):
     # TODO: gspread または Google Sheets API v4 で1行追加
-    raise NotImplementedError
+    print("log_to_sheets:", row)
 
 
 def main():
