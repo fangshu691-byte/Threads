@@ -2,7 +2,7 @@ name: Daily Threads Pipeline
 
 on:
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: "0 22-23,0-11 * * *"
   workflow_dispatch: {}
 
 jobs:
