@@ -162,15 +162,35 @@ def log_to_sheets(row: dict):
     print("log_to_sheets:", row)
 
 
+def weighted_length(text: str) -> int:
+    """全角文字(日本語など)を2、半角文字を1としてカウントする。
+    ThreadsのAPIは全角文字を2文字分として500文字制限を判定しているため。"""
+    length = 0
+    for ch in text:
+        code = ord(ch)
+        if code <= 0x7E or 0xFF61 <= code <= 0xFF9F:
+            length += 1
+        else:
+            length += 2
+    return length
+
+
 def build_threads_text(thread: dict) -> str:
-    """Threadsは1投稿500文字までのため、収まらない場合はフックとLINE誘導のみに絞る。"""
+    """Threadsは全角換算で500文字までのため、収まらない場合は段階的に短くする。"""
     full_text = "\n\n".join(thread.values())
-    if len(full_text) <= 480:
+    if weighted_length(full_text) <= 460:
         return full_text
+
     short_text = "\n\n".join([thread.get("post_1", ""), thread.get("post_4", "")])
-    if len(short_text) <= 480:
+    if weighted_length(short_text) <= 460:
         return short_text
-    return short_text[:480]
+
+    result = ""
+    for ch in short_text:
+        if weighted_length(result + ch) > 460:
+            break
+        result += ch
+    return result
 
 
 def main():
