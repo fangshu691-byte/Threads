@@ -59,8 +59,8 @@ def generate_thread_text(theme: str) -> dict:
 以下のペルソナ・オファー・型に沿って、今日のThreads投稿(①→②→③→④)を1本作成してください。
 今回のテーマは「{theme}」です。このテーマに沿った内容にしてください。
 
-post_4(最後の投稿)には、LINE公式アカウントへの登録リンクとして必ず次のURLをそのまま含めてください:
-{LINE_URL}
+post_4(最後の投稿)は、LINE公式アカウントへの誘導キャプションのみにしてください。
+URLはこちらで別途付与するので、post_4の文章にはURLを含めないでください。
 
 # ペルソナ
 {persona}
@@ -196,6 +196,9 @@ def build_threads_text(thread: dict) -> str:
 def main():
     theme = get_theme_for_now()
     thread = generate_thread_text(theme)
+
+    thread["post_4"] = f"{thread.get('post_4', '')}\n\n{LINE_URL}"
+
     full_text = "\n\n".join(thread.values())
     threads_text = build_threads_text(thread)
 
