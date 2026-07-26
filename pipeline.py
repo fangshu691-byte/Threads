@@ -118,8 +118,8 @@ BLOTATO_ACCOUNT_IDS = {
 }
 
 
-def post_to_blotato(platform: str, text: str) -> str:
-    """Blotato REST APIで指定プラットフォームにテキスト投稿する。"""
+def post_thread_to_blotato(platform: str, main_text: str, additional_texts: list) -> str:
+    """Blotato REST APIで、メイン投稿+スレッド(返信の連なり)として投稿する。"""
     api_key = os.environ["BLOTATO_API_KEY"]
     account_id = BLOTATO_ACCOUNT_IDS.get(platform)
     if not account_id:
@@ -129,9 +129,12 @@ def post_to_blotato(platform: str, text: str) -> str:
         "post": {
             "accountId": account_id,
             "content": {
-                "text": text,
+                "text": main_text,
                 "mediaUrls": [],
                 "platform": platform,
+                "additionalPosts": [
+                    {"text": t, "mediaUrls": []} for t in additional_texts
+                ],
             },
             "target": {"targetType": platform},
         }
@@ -197,12 +200,18 @@ def main():
     theme = get_theme_for_now()
     thread = generate_thread_text(theme)
 
-    thread["post_4"] = f"{thread.get('post_4', '')}\n\n{LINE_URL}"
+    main_text = "\n\n".join([
+        thread.get("post_1", ""),
+        thread.get("post_2", ""),
+        thread.get("post_3", ""),
+    ])
+    line_thread_text = f"{thread.get('post_4', '')}\n\n{LINE_URL}"
 
-    full_text = "\n\n".join(thread.values())
-    threads_text = build_threads_text(thread)
+    full_text = main_text + "\n\n" + line_thread_text
 
-    threads_post_id = post_to_blotato("threads", threads_text)
+    threads_post_id = post_thread_to_blotato(
+        "threads", main_text, [line_thread_text]
+    )
 
     notify_for_line_voom(full_text)
 
@@ -210,7 +219,6 @@ def main():
         "date": datetime.datetime.now().isoformat(),
         "theme": theme,
         "text": full_text,
-        "threads_text": threads_text,
         "threads_post_id": threads_post_id,
     })
 
