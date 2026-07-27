@@ -1,0 +1,53 @@
+name: daily-post
+
+on:
+  schedule:
+    # 毎日 UTC 0:00(JST 9:00)に実行。運用に合わせて変更してください
+    - cron: "0 0 * * *"
+  workflow_dispatch: {}
+
+# state.json をコミットし直すために書き込み権限が必要
+permissions:
+  contents: write
+
+concurrency:
+  group: daily-post
+  cancel-in-progress: false
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run Blotato scheduler
+        env:
+          BLOTATO_API_KEY: ${{ secrets.BLOTATO_API_KEY }}
+        run: python blotato_threads_post.py
+
+      - name: Commit updated state.json
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          if git diff --quiet -- blotato_post_state.json; then
+            echo "state.jsonに変更なし。コミットをスキップします。"
+            exit 0
+          fi
+
+          git add blotato_post_state.json
+          git commit -m "chore: update blotato_post_state.json [skip ci]"
+
+          git pull --rebase origin "${GITHUB_REF_NAME}"
+          git push origin HEAD:"${GITHUB_REF_NAME}"
