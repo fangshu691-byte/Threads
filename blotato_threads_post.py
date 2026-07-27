@@ -158,6 +158,8 @@ def build_payload(account_id, main_text, reply_text, scheduled_time):
 
 def submit_post(payload):
     resp = requests.post(f"{BASE_URL}/posts", headers=HEADERS, json=payload)
+    if not resp.ok:
+        print(f"Blotato APIエラー本文: {resp.text}")
     resp.raise_for_status()
     return resp.json()["postSubmissionId"]
 
@@ -171,15 +173,18 @@ def schedule_new_backlog_items(backlog=CONTENT_BACKLOG, account_id=None, interva
         account_id = get_threads_account_id()
 
     state = load_state()
-    now = datetime.now(timezone.utc)
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    # 「今すぐ」扱いにすると、リクエスト到達時には過去の時刻になり
+    # バリデーションで弾かれることがあるため、最低2分先を下限にする
+    floor_time = now + timedelta(minutes=2)
 
     if state["next_slot"] is None:
-        next_slot = now
+        next_slot = floor_time
     else:
-        next_slot = datetime.fromisoformat(state["next_slot"].replace("Z", "+00:00"))
-        if next_slot < now:
+        next_slot = datetime.fromisoformat(state["next_slot"].replace("Z", "+00:00")).replace(microsecond=0)
+        if next_slot < floor_time:
             # 積み残し・実行漏れがあった場合は「今」から仕切り直す
-            next_slot = now
+            next_slot = floor_time
 
     new_items = [item for item in backlog if item["id"] not in state["posted_ids"]]
 
