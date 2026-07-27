@@ -2,38 +2,26 @@
 Blotato経由 Threads自動投稿スクリプト
 (本文投稿 + 公式LINEリンク付きリプライを同じスレッドにまとめて投稿)
 
-【重要】前バージョンからの変更点:
-これまでは実行するたびに「今」を起点に1時間おきの時刻を計算し直す
-一回きりのスクリプトだったため、
-- 1回実行してキュー内の投稿を予約したらそこで終わり
-- 続きを予約する仕組みが無い
-- 再実行しても前回の予約状況を無視して「今」からやり直す
-という設計上の欠陥がありました。これが「昨日の手動投稿から
-自動投稿が動いていない」の原因です(エラーで落ちていたのではなく、
-そもそも1回分しか予約しない作りだった、ということです)。
+【運用ルール】
+- 7:00〜19:00の間、1時間に1回投稿(GitHub Actionsのcronで13回/日トリガー)
+- content_backlog.json (91本 = 13本/日 × 7日) を1週間サイクルとして周回する
+- 投稿するたびに post_log.jsonl に「どのテーマ・どのテンプレートを投稿したか」を
+  記録する(後で analyze_performance.py と組み合わせて、
+  どの切り口がバズったか集計できるようにするため)
 
-今回から state.json に「次の予約時刻」と「予約済みID」を保存し、
-- 何度実行しても続きから予約される(重複しない)
-- content_backlog.json に新しい投稿を追記していけば、そのまま続きが積まれる
-という形にしています。
+【設計】
+このスクリプトは「呼ばれたら、次の1件を今すぐ投稿してカーソルを進めるだけ」
+というシンプルな作りです。時間の間隔や「7:00〜19:00」という制約は
+すべて呼び出し側(GitHub Actionsのcron)が管理します。
 
-運用方法:
-1. content_backlog.json (同じディレクトリ) に投稿したい内容を追記していく
-2. このスクリプトを cron などで「1日1回」実行する
-   (1時間おきに実行する必要はありません。実行するたびに
-    未予約の投稿をBlotatoのscheduledTimeで積んでいくだけです)
-3. Blotato側が指定時刻に実際の投稿を行います
+state.json には次に投稿すべき content_backlog.json のインデックス(cursor)を
+保存します。cursor は len(backlog) で割った余りを使うので、
+最後の投稿が終わると自動的に先頭に戻り、1週間サイクルが繰り返されます。
 
 前提:
 - Blotato アカウントで Threads を連携済み
 - 環境変数 BLOTATO_API_KEY にAPIキーを設定
-
-参考:
-- Base URL: https://backend.blotato.com/v2
-- 認証ヘッダー: blotato-api-key
-- Threads は Twitter/Bluesky と同じ仕組みで、
-  content.additionalPosts[] に入れた投稿が自動でリプライスレッドとして
-  1回のAPI呼び出しで連結される(reply_to_id を自分で管理する必要はない)
+- content_backlog.json がこのファイルと同じディレクトリにあること
 
 使い方:
     python blotato_threads_post.py
@@ -53,16 +41,12 @@ HEADERS = {
 }
 
 STATE_FILE = Path(__file__).with_name("blotato_post_state.json")
-CONTENT_BACKLOG_FILE = Path(__file__).with_name("content_backlog.json")
-
-# 公式LINEのリンク(実際のURLに差し替えてください)
-LINE_URL = "https://line.me/R/ti/p/@your_official_line_id"
+BACKLOG_FILE = Path(__file__).with_name("content_backlog.json")
+POST_LOG_FILE = Path(__file__).with_name("post_log.jsonl")
 
 
-def load_content_backlog():
-    """content_backlog.json から投稿バックログを読み込む。
-    ここに項目を追記していけば、そのまま続きが1時間おきで積まれる。"""
-    with open(CONTENT_BACKLOG_FILE, "r", encoding="utf-8") as f:
+def load_backlog():
+    with open(BACKLOG_FILE, "r", encoding="utf-8") as f:
         return json.load(f)
 
 
@@ -70,12 +54,18 @@ def load_state():
     if STATE_FILE.exists():
         with open(STATE_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
-    return {"next_slot": None, "posted_ids": []}
+    return {"cursor": 0}
 
 
 def save_state(state):
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
+
+
+def append_post_log(record):
+    """投稿1件ごとに1行のJSONを追記する(後で分析スクリプトが読む)"""
+    with open(POST_LOG_FILE, "a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
 def get_threads_account_id():
@@ -93,7 +83,7 @@ def get_threads_account_id():
     raise RuntimeError("Threadsアカウントが見つかりません。Blotatoでの連携状況を確認してください。")
 
 
-def build_payload(account_id, main_text, reply_text, scheduled_time):
+def build_payload(account_id, main_text, reply_text, scheduled_time=None):
     post = {
         "accountId": account_id,
         "content": {
@@ -106,7 +96,10 @@ def build_payload(account_id, main_text, reply_text, scheduled_time):
         },
         "target": {"targetType": "threads"},
     }
-    return {"post": post, "scheduledTime": scheduled_time}
+    payload = {"post": post}
+    if scheduled_time:
+        payload["scheduledTime"] = scheduled_time
+    return payload
 
 
 def submit_post(payload):
@@ -117,57 +110,56 @@ def submit_post(payload):
     return resp.json()["postSubmissionId"]
 
 
-def schedule_new_backlog_items(backlog=None, account_id=None, interval_hours=1):
+def post_next_in_cycle(account_id=None, buffer_minutes=2):
     """
-    まだ予約していない投稿だけを、前回の続きの時刻から1時間おきで予約する。
-    何度実行しても安全(posted_ids で重複防止)。
+    content_backlog.json の「次の1件」を投稿してカーソルを進める。
+    最後まで行ったら自動的に先頭に戻る(=1週間サイクル)。
+    投稿するたびに post_log.jsonl に記録を残す。
     """
-    if backlog is None:
-        backlog = load_content_backlog()
+    backlog = load_backlog()
+    if not backlog:
+        raise RuntimeError("content_backlog.json が空です。投稿内容を追加してください。")
+
     if account_id is None:
         account_id = get_threads_account_id()
 
     state = load_state()
-    now = datetime.now(timezone.utc).replace(microsecond=0)
-    # 「今すぐ」扱いにすると、リクエスト到達時には過去の時刻になり
-    # バリデーションで弾かれることがあるため、最低2分先を下限にする
-    floor_time = now + timedelta(minutes=2)
+    cursor = state.get("cursor", 0) % len(backlog)
+    item = backlog[cursor]
 
-    if state["next_slot"] is None:
-        next_slot = floor_time
-    else:
-        next_slot = datetime.fromisoformat(state["next_slot"].replace("Z", "+00:00")).replace(microsecond=0)
-        if next_slot < floor_time:
-            # 積み残し・実行漏れがあった場合は「今」から仕切り直す
-            next_slot = floor_time
+    # 即時投稿だと到達時に過去時刻扱いで弾かれることがあるため、少し先の時刻を指定
+    scheduled_time = (
+        datetime.now(timezone.utc).replace(microsecond=0) + timedelta(minutes=buffer_minutes)
+    ).isoformat().replace("+00:00", "Z")
 
-    new_items = [item for item in backlog if item["id"] not in state["posted_ids"]]
+    payload = build_payload(account_id, item["main_text"], item["reply_text"], scheduled_time)
+    submission_id = submit_post(payload)
 
-    if not new_items:
-        print("新しく予約する投稿はありません(バックログは全て予約済みです)。")
-        return []
+    print(f"投稿完了: [{cursor+1}/{len(backlog)}] {item['label']} / postSubmissionId={submission_id}")
 
-    results = []
-    for item in new_items:
-        scheduled_time_str = next_slot.isoformat().replace("+00:00", "Z")
-        payload = build_payload(account_id, item["main_text"], item["reply_text"], scheduled_time_str)
-        submission_id = submit_post(payload)
+    state["cursor"] = (cursor + 1) % len(backlog)
+    save_state(state)
 
-        print(f"予約完了: {item['label']} / postSubmissionId={submission_id} / 予定時刻={scheduled_time_str}")
+    append_post_log({
+        "posted_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "scheduled_time": scheduled_time,
+        "cycle_position": cursor,
+        "id": item["id"],
+        "label": item["label"],
+        "theme": item.get("theme"),
+        "template": item.get("template"),
+        "day": item.get("day"),
+        "slot": item.get("slot"),
+        "postSubmissionId": submission_id,
+    })
 
-        state["posted_ids"].append(item["id"])
-        next_slot = next_slot + timedelta(hours=interval_hours)
-        state["next_slot"] = next_slot.isoformat().replace("+00:00", "Z")
-        save_state(state)  # 1件ごとに保存。途中で落ちても続きから再開できる
-
-        results.append({
-            "label": item["label"],
-            "postSubmissionId": submission_id,
-            "scheduledTime": scheduled_time_str,
-        })
-
-    return results
+    return {
+        "label": item["label"],
+        "postSubmissionId": submission_id,
+        "scheduledTime": scheduled_time,
+        "cursor_before": cursor,
+    }
 
 
 if __name__ == "__main__":
-    schedule_new_backlog_items(interval_hours=1)
+    post_next_in_cycle()
