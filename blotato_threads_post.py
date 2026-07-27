@@ -2,10 +2,31 @@
 Blotato経由 Threads自動投稿スクリプト
 (本文投稿 + 公式LINEリンク付きリプライを同じスレッドにまとめて投稿)
 
+【重要】前バージョンからの変更点:
+これまでは実行するたびに「今」を起点に1時間おきの時刻を計算し直す
+一回きりのスクリプトだったため、
+- 1回実行してキュー内の投稿を予約したらそこで終わり
+- 続きを予約する仕組みが無い
+- 再実行しても前回の予約状況を無視して「今」からやり直す
+という設計上の欠陥がありました。これが「昨日の手動投稿から
+自動投稿が動いていない」の原因です(エラーで落ちていたのではなく、
+そもそも1回分しか予約しない作りだった、ということです)。
+
+今回から state.json に「次の予約時刻」と「予約済みID」を保存し、
+- 何度実行しても続きから予約される(重複しない)
+- CONTENT_BACKLOG に新しい投稿を追記していけば、そのまま続きが積まれる
+という形にしています。
+
+運用方法:
+1. CONTENT_BACKLOG に投稿したい内容を追記していく
+2. このスクリプトを cron などで「1日1回」実行する
+   (1時間おきに実行する必要はありません。実行するたびに
+    未予約の投稿をBlotatoのscheduledTimeで積んでいくだけです)
+3. Blotato側が指定時刻に実際の投稿を行います
+
 前提:
 - Blotato アカウントで Threads を連携済み
 - 環境変数 BLOTATO_API_KEY にAPIキーを設定
-- accountId は GET /v2/users/me/accounts から取得(初回のみ確認すればOK)
 
 参考:
 - Base URL: https://backend.blotato.com/v2
@@ -19,9 +40,10 @@ Blotato経由 Threads自動投稿スクリプト
 """
 
 import os
-import time
+import json
 import requests
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 BASE_URL = "https://backend.blotato.com/v2"
 API_KEY = os.environ["BLOTATO_API_KEY"]
@@ -30,12 +52,15 @@ HEADERS = {
     "blotato-api-key": API_KEY,
 }
 
+STATE_FILE = Path(__file__).with_name("blotato_post_state.json")
+
 # 公式LINEのリンク(実際のURLに差し替えてください)
 LINE_URL = "https://line.me/R/ti/p/@your_official_line_id"
 
-# ---- 投稿キュー:今回追加する3パターン ----------------------------------
-POST_QUEUE = [
+# ---- 投稿バックログ:ここに追記していけば、そのまま続きが1時間おきで積まれる ----
+CONTENT_BACKLOG = [
     {
+        "id": "rejection-bleach-2026-07",
         "label": "拒絶体験・暴露系",
         "main_text": (
             "「その年齢だとブリーチはキツいです」\n\n"
@@ -51,6 +76,7 @@ POST_QUEUE = [
         ),
     },
     {
+        "id": "fear-aging-2026-07",
         "label": "老け見え不安・気づき系",
         "main_text": (
             "白髪気にしてる人、実は\n"
@@ -67,6 +93,7 @@ POST_QUEUE = [
         ),
     },
     {
+        "id": "lost-compliments-2026-07",
         "label": "郷愁・共感系",
         "main_text": (
             "「髪綺麗だね」って\n"
@@ -86,6 +113,18 @@ POST_QUEUE = [
 # -------------------------------------------------------------------------
 
 
+def load_state():
+    if STATE_FILE.exists():
+        with open(STATE_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {"next_slot": None, "posted_ids": []}
+
+
+def save_state(state):
+    with open(STATE_FILE, "w", encoding="utf-8") as f:
+        json.dump(state, f, ensure_ascii=False, indent=2)
+
+
 def get_threads_account_id():
     """連携済みアカウント一覧からThreadsのaccountIdを取得"""
     resp = requests.get(f"{BASE_URL}/users/me/accounts", headers=HEADERS)
@@ -97,31 +136,20 @@ def get_threads_account_id():
     raise RuntimeError("Threadsアカウントが見つかりません。Blotatoでの連携状況を確認してください。")
 
 
-def build_payload(account_id, main_text, reply_text, scheduled_time=None, use_next_free_slot=False):
+def build_payload(account_id, main_text, reply_text, scheduled_time):
     post = {
         "accountId": account_id,
         "content": {
             "text": main_text,
             "mediaUrls": [],
             "platform": "threads",
-            # additionalPosts に入れるだけで、Blotato側が自動でリプライスレッドとして連結する
             "additionalPosts": [
-                {
-                    "text": reply_text,
-                    "mediaUrls": [],
-                }
+                {"text": reply_text, "mediaUrls": []}
             ],
         },
-        "target": {
-            "targetType": "threads",
-        },
+        "target": {"targetType": "threads"},
     }
-    payload = {"post": post}
-    if scheduled_time:
-        payload["scheduledTime"] = scheduled_time
-    elif use_next_free_slot:
-        payload["useNextFreeSlot"] = True
-    return payload
+    return {"post": post, "scheduledTime": scheduled_time}
 
 
 def submit_post(payload):
@@ -130,70 +158,52 @@ def submit_post(payload):
     return resp.json()["postSubmissionId"]
 
 
-def poll_post_status(post_submission_id, interval=3, timeout=60):
+def schedule_new_backlog_items(backlog=CONTENT_BACKLOG, account_id=None, interval_hours=1):
     """
-    投稿ステータスをポーリングして最終結果を取得する(任意)。
-    スケジュール投稿の場合は published になるまで待たず、
-    「scheduled」の確認が取れた時点で返す。
-    """
-    elapsed = 0
-    while elapsed < timeout:
-        resp = requests.get(f"{BASE_URL}/posts/{post_submission_id}", headers=HEADERS)
-        resp.raise_for_status()
-        data = resp.json()
-        status = data.get("status")
-        if status in ("published", "failed", "scheduled"):
-            return data
-        time.sleep(interval)
-        elapsed += interval
-    raise TimeoutError(f"ステータス確認がタイムアウトしました: {post_submission_id}")
-
-
-def schedule_queue_hourly(queue=POST_QUEUE, account_id=None, interval_hours=1, start_time=None):
-    """
-    キューの投稿を1時間おき(interval_hours で変更可)にスケジュールする。
-    Blotato側のキューに予約として積むだけなので、
-    このスクリプトは実行後すぐ終了してOK(起動しっぱなしにする必要はない)。
-
-    start_time: 1本目の投稿時刻(datetime, UTC想定)。省略時は「今すぐ」扱い。
-                2本目以降は start_time から interval_hours おきに自動計算される。
+    まだ予約していない投稿だけを、前回の続きの時刻から1時間おきで予約する。
+    何度実行しても安全(posted_ids で重複防止)。
     """
     if account_id is None:
         account_id = get_threads_account_id()
 
-    # start_time省略時は「今すぐ」を基準に、1本目=即時投稿、2本目以降を1時間おきにスケジュール
-    immediate_first = start_time is None
-    base_time = datetime.now(timezone.utc) if immediate_first else start_time
+    state = load_state()
+    now = datetime.now(timezone.utc)
+
+    if state["next_slot"] is None:
+        next_slot = now
+    else:
+        next_slot = datetime.fromisoformat(state["next_slot"].replace("Z", "+00:00"))
+        if next_slot < now:
+            # 積み残し・実行漏れがあった場合は「今」から仕切り直す
+            next_slot = now
+
+    new_items = [item for item in backlog if item["id"] not in state["posted_ids"]]
+
+    if not new_items:
+        print("新しく予約する投稿はありません(バックログは全て予約済みです)。")
+        return []
 
     results = []
-    for i, item in enumerate(queue):
-        print(f"\n=== [{i+1}/{len(queue)}] {item['label']} をスケジュールします ===")
-
-        if i == 0 and immediate_first:
-            scheduled_time = None  # 即時投稿
-        else:
-            post_time = base_time + timedelta(hours=interval_hours * i)
-            scheduled_time = post_time.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
-
-        payload = build_payload(
-            account_id,
-            item["main_text"],
-            item["reply_text"],
-            scheduled_time=scheduled_time,
-        )
+    for item in new_items:
+        scheduled_time_str = next_slot.isoformat().replace("+00:00", "Z")
+        payload = build_payload(account_id, item["main_text"], item["reply_text"], scheduled_time_str)
         submission_id = submit_post(payload)
-        when = scheduled_time if scheduled_time else "即時"
-        print(f"投稿を登録: postSubmissionId={submission_id} / 予定時刻={when}")
+
+        print(f"予約完了: {item['label']} / postSubmissionId={submission_id} / 予定時刻={scheduled_time_str}")
+
+        state["posted_ids"].append(item["id"])
+        next_slot = next_slot + timedelta(hours=interval_hours)
+        state["next_slot"] = next_slot.isoformat().replace("+00:00", "Z")
+        save_state(state)  # 1件ごとに保存。途中で落ちても続きから再開できる
 
         results.append({
             "label": item["label"],
             "postSubmissionId": submission_id,
-            "scheduledTime": scheduled_time,
+            "scheduledTime": scheduled_time_str,
         })
 
     return results
 
 
 if __name__ == "__main__":
-    # 例: 1本目は今すぐ、2本目は1時間後、3本目は2時間後...と1時間おきにスケジュール
-    schedule_queue_hourly(POST_QUEUE, interval_hours=1)
+    schedule_new_backlog_items(interval_hours=1)
