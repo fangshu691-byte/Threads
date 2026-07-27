@@ -127,12 +127,16 @@ def save_state(state):
 
 def get_threads_account_id():
     """連携済みアカウント一覧からThreadsのaccountIdを取得"""
-    resp = requests.get(f"{BASE_URL}/users/me/accounts", headers=HEADERS)
+    resp = requests.get(
+        f"{BASE_URL}/users/me/accounts",
+        headers=HEADERS,
+        params={"platform": "threads"},
+    )
     resp.raise_for_status()
-    accounts = resp.json().get("accounts", resp.json())
-    for acc in accounts:
+    items = resp.json().get("items", [])
+    for acc in items:
         if acc.get("platform", "").lower() == "threads":
-            return acc["id"] if "id" in acc else acc.get("accountId")
+            return acc["id"]
     raise RuntimeError("Threadsアカウントが見つかりません。Blotatoでの連携状況を確認してください。")
 
 
