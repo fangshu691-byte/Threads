@@ -14,11 +14,11 @@ Blotato経由 Threads自動投稿スクリプト
 
 今回から state.json に「次の予約時刻」と「予約済みID」を保存し、
 - 何度実行しても続きから予約される(重複しない)
-- CONTENT_BACKLOG に新しい投稿を追記していけば、そのまま続きが積まれる
+- content_backlog.json に新しい投稿を追記していけば、そのまま続きが積まれる
 という形にしています。
 
 運用方法:
-1. CONTENT_BACKLOG に投稿したい内容を追記していく
+1. content_backlog.json (同じディレクトリ) に投稿したい内容を追記していく
 2. このスクリプトを cron などで「1日1回」実行する
    (1時間おきに実行する必要はありません。実行するたびに
     未予約の投稿をBlotatoのscheduledTimeで積んでいくだけです)
@@ -53,64 +53,17 @@ HEADERS = {
 }
 
 STATE_FILE = Path(__file__).with_name("blotato_post_state.json")
+CONTENT_BACKLOG_FILE = Path(__file__).with_name("content_backlog.json")
 
 # 公式LINEのリンク(実際のURLに差し替えてください)
 LINE_URL = "https://line.me/R/ti/p/@your_official_line_id"
 
-# ---- 投稿バックログ:ここに追記していけば、そのまま続きが1時間おきで積まれる ----
-CONTENT_BACKLOG = [
-    {
-        "id": "rejection-bleach-2026-07",
-        "label": "拒絶体験・暴露系",
-        "main_text": (
-            "「その年齢だとブリーチはキツいです」\n\n"
-            "これ、正直に言うと大体そのまま\n"
-            "帰っちゃうお客さん多いんだけど\n\n"
-            "実はブリーチしなくても\n"
-            "白髪ぼかしながら抜け感出す方法あるからね\n\n"
-            "知らないだけでみんな損してる"
-        ),
-        "reply_text": (
-            "白髪ぼかしのやり方、公式LINEにまとめてます。\n"
-            f"{LINE_URL}"
-        ),
-    },
-    {
-        "id": "fear-aging-2026-07",
-        "label": "老け見え不安・気づき系",
-        "main_text": (
-            "白髪気にしてる人、実は\n"
-            "「白髪があること」より\n"
-            "「暗く重く見えること」の方が\n"
-            "老けて見えてる原因だったりする\n\n"
-            "白髪隠す前に、まずそこ直した方が\n"
-            "圧倒的に若返る\n\n"
-            "美容師やっててマジで思う"
-        ),
-        "reply_text": (
-            "垢抜けさせる具体的なやり方は公式LINEに置いてます。\n"
-            f"{LINE_URL}"
-        ),
-    },
-    {
-        "id": "lost-compliments-2026-07",
-        "label": "郷愁・共感系",
-        "main_text": (
-            "「髪綺麗だね」って\n"
-            "最近言われなくなった気がする人\n\n"
-            "それ、白髪のせいじゃなくて\n"
-            "ただ手入れの仕方が\n"
-            "昔と変わってないだけかも\n\n"
-            "3回くらい通ってもらえたら\n"
-            "普通に戻せます"
-        ),
-        "reply_text": (
-            "髪の印象を戻す手順は公式LINEにまとめてます。\n"
-            f"{LINE_URL}"
-        ),
-    },
-]
-# -------------------------------------------------------------------------
+
+def load_content_backlog():
+    """content_backlog.json から投稿バックログを読み込む。
+    ここに項目を追記していけば、そのまま続きが1時間おきで積まれる。"""
+    with open(CONTENT_BACKLOG_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
 
 
 def load_state():
@@ -164,11 +117,13 @@ def submit_post(payload):
     return resp.json()["postSubmissionId"]
 
 
-def schedule_new_backlog_items(backlog=CONTENT_BACKLOG, account_id=None, interval_hours=1):
+def schedule_new_backlog_items(backlog=None, account_id=None, interval_hours=1):
     """
     まだ予約していない投稿だけを、前回の続きの時刻から1時間おきで予約する。
     何度実行しても安全(posted_ids で重複防止)。
     """
+    if backlog is None:
+        backlog = load_content_backlog()
     if account_id is None:
         account_id = get_threads_account_id()
 
