@@ -10,6 +10,7 @@
 import os
 import re
 import json
+import time
 import datetime
 import requests
 
@@ -33,6 +34,18 @@ THEMES = [
 ]
 
 LINE_URL = "https://lin.ee/9UzZKWk"
+
+
+def call_anthropic_with_retry(request_func, max_retries=5):
+    for attempt in range(max_retries):
+        response = request_func()
+        if response.status_code == 529:
+            wait = min(2 ** attempt, 30)  # 指数バックオフ(上限30秒)
+            print(f"529 Overloaded。{wait}秒待機してリトライ({attempt+1}/{max_retries})")
+            time.sleep(wait)
+            continue
+        return response
+    raise RuntimeError("リトライ上限に達しました(529が続いています)")
 
 
 def load_template(filename: str) -> str:
@@ -78,7 +91,7 @@ Threadsは1投稿あたり500文字までのため、post_1〜post_4を全部つ
 """
 
     api_key = os.environ["ANTHROPIC_API_KEY"]
-    response = requests.post(
+    response = call_anthropic_with_retry(lambda: requests.post(
         "https://api.anthropic.com/v1/messages",
         headers={
             "x-api-key": api_key,
@@ -90,7 +103,7 @@ Threadsは1投稿あたり500文字までのため、post_1〜post_4を全部つ
             "max_tokens": 2000,
             "messages": [{"role": "user", "content": prompt}],
         },
-    )
+    ))
     response.raise_for_status()
     data = response.json()
     text = data["content"][0]["text"].strip()
