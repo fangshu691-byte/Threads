@@ -134,6 +134,7 @@ def post_next_in_cycle(account_id=None, buffer_minutes=2):
     state = load_state()
     cursor = state.get("cursor", 0) % len(backlog)
     item = backlog[cursor]
+    print(f"[cursor] 実行前: {cursor} (backlog全{len(backlog)}件中)")
 
     scheduled_time = (
         datetime.now(timezone.utc).replace(microsecond=0) + timedelta(minutes=buffer_minutes)
@@ -148,6 +149,7 @@ def post_next_in_cycle(account_id=None, buffer_minutes=2):
 
     state["cursor"] = (cursor + 1) % len(backlog)
     save_state(state)
+    print(f"[cursor] 実行後(ローカル): {state['cursor']} ← この後のgit pushが失敗すると次回また{cursor}に戻ります")
 
     append_post_log({
         "posted_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
