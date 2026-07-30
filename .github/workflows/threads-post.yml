@@ -7,9 +7,12 @@ name: threads-post
 
 on:
   schedule:
-    # JST 7:00〜19:00 の間、毎時実行(13回/日)。
-    # UTC換算: 22:00-23:00, 0:00-10:00
-    - cron: "0 0-10,22-23 * * *"
+    # JST 7:07〜19:07 の間、毎時実行(13回/日)。
+    # ちょうど「00分」は世界中の大量のワークフローが集中し、
+    # GitHub Actions側で混雑・遅延・ドロップされやすいことが知られているため、
+    # あえて7分ずらして混雑を避ける。
+    # UTC換算: 22:07-23:07, 0:07-10:07
+    - cron: "7 0-10,22-23 * * *"
   workflow_dispatch: {}
 
 permissions:
@@ -61,3 +64,14 @@ jobs:
           git commit -m "chore: update state and post log [skip ci]"
           git pull --rebase origin "${GITHUB_REF_NAME}"
           git push origin HEAD:"${GITHUB_REF_NAME}"
+
+      - name: Verify state.json actually reached remote
+        run: |
+          git fetch origin "${GITHUB_REF_NAME}"
+          LOCAL_CURSOR=$(python3 -c "import json; print(json.load(open('blotato_post_state.json'))['cursor'])")
+          REMOTE_CURSOR=$(git show "origin/${GITHUB_REF_NAME}:blotato_post_state.json" | python3 -c "import json,sys; print(json.load(sys.stdin)['cursor'])")
+          echo "ローカルのcursor: ${LOCAL_CURSOR} / リモートのcursor: ${REMOTE_CURSOR}"
+          if [ "$LOCAL_CURSOR" != "$REMOTE_CURSOR" ]; then
+            echo "::error::state.jsonのpushがリモートに反映されていません(ローカル=${LOCAL_CURSOR}, リモート=${REMOTE_CURSOR})。次回also同じ投稿が繰り返される原因になります。"
+            exit 1
+          fi
