@@ -55,7 +55,9 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          if git diff --quiet -- blotato_post_state.json post_log.jsonl; then
+          # git diff は untracked(新規)ファイルを無視してしまうため、
+          # git status --porcelain で新規・変更どちらも検出する
+          if [ -z "$(git status --porcelain -- blotato_post_state.json post_log.jsonl)" ]; then
             echo "変更なし。コミットをスキップします。"
             exit 0
           fi
@@ -69,9 +71,13 @@ jobs:
         run: |
           git fetch origin "${GITHUB_REF_NAME}"
           LOCAL_CURSOR=$(python3 -c "import json; print(json.load(open('blotato_post_state.json'))['cursor'])")
-          REMOTE_CURSOR=$(git show "origin/${GITHUB_REF_NAME}:blotato_post_state.json" | python3 -c "import json,sys; print(json.load(sys.stdin)['cursor'])")
+          if ! git show "origin/${GITHUB_REF_NAME}:blotato_post_state.json" > /tmp/remote_state.json 2>/dev/null; then
+            echo "::error::blotato_post_state.jsonがリモートに一度も存在しません。直前のコミット/pushが失敗しています。"
+            exit 1
+          fi
+          REMOTE_CURSOR=$(python3 -c "import json; print(json.load(open('/tmp/remote_state.json'))['cursor'])")
           echo "ローカルのcursor: ${LOCAL_CURSOR} / リモートのcursor: ${REMOTE_CURSOR}"
           if [ "$LOCAL_CURSOR" != "$REMOTE_CURSOR" ]; then
-            echo "::error::state.jsonのpushがリモートに反映されていません(ローカル=${LOCAL_CURSOR}, リモート=${REMOTE_CURSOR})。次回also同じ投稿が繰り返される原因になります。"
+            echo "::error::state.jsonのpushがリモートに反映されていません(ローカル=${LOCAL_CURSOR}, リモート=${REMOTE_CURSOR})。次回も同じ投稿が繰り返される原因になります。"
             exit 1
           fi
