@@ -136,6 +136,15 @@ def post_next_in_cycle(account_id=None, buffer_minutes=2):
     item = backlog[cursor]
     print(f"[cursor] 実行前: {cursor} (backlog全{len(backlog)}件中)")
 
+    # Threads側の実質的な文字数上限はUTF-8バイト数で判定されている(実測で確認済み)。
+    # 500バイトを超えるとBlotato側で422エラーになるため、送信前にここで検知する。
+    main_bytes = len(item["main_text"].encode("utf-8"))
+    if main_bytes > 500:
+        raise RuntimeError(
+            f"[guard] main_textが{main_bytes}バイトあり、Threadsの実質上限(500バイト)を"
+            f"超えています。id={item['id']} content_backlog.jsonを修正してください。"
+        )
+
     scheduled_time = (
         datetime.now(timezone.utc).replace(microsecond=0) + timedelta(minutes=buffer_minutes)
     ).isoformat().replace("+00:00", "Z")
